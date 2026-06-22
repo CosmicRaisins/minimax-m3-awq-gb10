@@ -9,16 +9,25 @@ Run [`cyankiwi/MiniMax-M3-AWQ-INT4`](https://huggingface.co/cyankiwi/MiniMax-M3-
 
 Four small vLLM patches (`mods/`) + a serve recipe (`recipe.yaml`).
 
-## Benchmark (4× GB10, TP=4, EAGLE3 k=2, llama-benchy)
+## Benchmark (4× GB10, TP=4, EAGLE3 k=2, llama-benchy, pp=2048 / tg=512, median of 5)
 
-| | bf16 KV | **fp8 KV (this setup)** |
+Throughput per context depth (fp8 KV ≈ bf16 — throughput-neutral):
+
+| depth | prefill (PP) | decode (TG) |
 |---|---|---|
-| Decode @ 32k ctx | 28.6 tok/s | **29.4 tok/s** |
-| Prefill | ~1.6k tok/s | ~1.7k tok/s |
-| KV cache @ 262k ctx | ~0.69M tokens | **1.38M tokens** |
-| Max concurrency @ 262k | 2.6× | **5.27×** |
+| 0 | 1579 tok/s | 32.2 tok/s |
+| 8k | 1698 tok/s | 29.9 tok/s |
+| 32k | 1665 tok/s | 28.6 tok/s |
+| 64k | 1596 tok/s | 25.5 tok/s |
 
-Decode is throughput-neutral (fp8 ≈ bf16); fp8's win is capacity. Decode across depth: ~32 / 30 / 29 / 26 tok/s at 0 / 8k / 32k / 64k.
+(fp8 KV spot-check @ 32k: PP 1691 / TG 29.4 — matches bf16.)
+
+fp8 KV's win is capacity:
+
+| KV dtype | KV cache @ 262k | max concurrency @ 262k |
+|---|---|---|
+| bf16 | ~0.69M tokens | 2.6× |
+| **fp8** | **1.38M tokens** | **5.27×** |
 
 ## Recipe (`vllm serve`)
 
