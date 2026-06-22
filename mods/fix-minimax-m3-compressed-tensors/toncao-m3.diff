@@ -1,0 +1,422 @@
+diff --git a/vllm/config/cache.py b/vllm/config/cache.py
+index 9b96c64513b1..e915fae348ee 100644
+--- a/vllm/config/cache.py
++++ b/vllm/config/cache.py
+@@ -45,9 +45,11 @@ class CacheConfig:
+ 
+     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+ 
+-    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
++    block_size: int = Field(default=128, gt=0)  # type: ignore[assignment]
+     """Size of a contiguous cache block in number of tokens.
+-    Accepts None (meaning "use default"). After construction, always int."""
++    Accepts None (meaning "use DEFAULT_BLOCK_SIZE"). After construction, always
++    int. Defaulted to 128 in this fork so MiniMax-M3's sparse kernels (which
++    only support block_size 128) work without an explicit --block-size."""
+     user_specified_block_size: bool = field(default=False, init=False)
+     """Whether block_size was explicitly provided. Derived automatically."""
+     user_specified_mamba_block_size: bool = field(default=False, init=False)
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index b4cc1cf0326e..020788d42cfb 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -501,7 +501,7 @@ class EngineArgs:
+     max_parallel_loading_workers: int | None = (
+         ParallelConfig.max_parallel_loading_workers
+     )
+-    block_size: int | None = None
++    block_size: int | None = 128
+     enable_prefix_caching: bool | None = None
+     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
+         CacheConfig.prefix_caching_hash_algo
+diff --git a/vllm/model_executor/layers/fused_moe/config.py b/vllm/model_executor/layers/fused_moe/config.py
+index 0755699d1a45..8cae91e4af04 100644
+--- a/vllm/model_executor/layers/fused_moe/config.py
++++ b/vllm/model_executor/layers/fused_moe/config.py
+@@ -881,6 +881,9 @@ def int4_w4a16_moe_quant_config(
+     block_shape: list[int] | None = None,
+     a1_gscale: torch.Tensor | None = None,
+     a2_gscale: torch.Tensor | None = None,
++    gemm1_alpha: float | None = None,
++    gemm1_beta: float | None = None,
++    gemm1_clamp_limit: float | None = None,
+ ) -> FusedMoEQuantConfig:
+     """
+     Construct a quant config for 16-bit float activations and int4 weights.
+@@ -891,6 +894,9 @@ def int4_w4a16_moe_quant_config(
+         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
+         _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
+         _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
++        gemm1_alpha=gemm1_alpha,
++        gemm1_beta=gemm1_beta,
++        gemm1_clamp_limit=gemm1_clamp_limit,
+     )
+ 
+ 
+@@ -944,6 +950,9 @@ def int8_w8a16_moe_quant_config(
+     block_shape: list[int] | None = None,
+     a1_gscale: torch.Tensor | None = None,
+     a2_gscale: torch.Tensor | None = None,
++    gemm1_alpha: float | None = None,
++    gemm1_beta: float | None = None,
++    gemm1_clamp_limit: float | None = None,
+ ) -> FusedMoEQuantConfig:
+     """
+     Construct a quant config for 16-bit float activations and int8 weights.
+@@ -954,6 +963,9 @@ def int8_w8a16_moe_quant_config(
+         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
+         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
+         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
++        gemm1_alpha=gemm1_alpha,
++        gemm1_beta=gemm1_beta,
++        gemm1_clamp_limit=gemm1_clamp_limit,
+     )
+ 
+ 
+diff --git a/vllm/model_executor/layers/fused_moe/oracle/int_wna16.py b/vllm/model_executor/layers/fused_moe/oracle/int_wna16.py
+index 8de6269e2e9e..b935e617a268 100644
+--- a/vllm/model_executor/layers/fused_moe/oracle/int_wna16.py
++++ b/vllm/model_executor/layers/fused_moe/oracle/int_wna16.py
+@@ -176,6 +176,9 @@ def make_wna16_moe_quant_config(
+     w2_bias: torch.Tensor | None = None,
+     a1_gscale: torch.Tensor | None = None,
+     a2_gscale: torch.Tensor | None = None,
++    gemm1_alpha: float | None = None,
++    gemm1_beta: float | None = None,
++    gemm1_clamp_limit: float | None = None,
+ ) -> FusedMoEQuantConfig:
+     """Create the FusedMoEQuantConfig for 4 or 8-bit WNA16 MoE."""
+     if num_bits == 4:
+@@ -189,6 +192,9 @@ def make_wna16_moe_quant_config(
+             block_shape=[0, group_size],
+             a1_gscale=a1_gscale,
+             a2_gscale=a2_gscale,
++            gemm1_alpha=gemm1_alpha,
++            gemm1_beta=gemm1_beta,
++            gemm1_clamp_limit=gemm1_clamp_limit,
+         )
+     else:
+         assert num_bits == 8
+@@ -202,6 +208,9 @@ def make_wna16_moe_quant_config(
+             block_shape=[0, group_size],
+             a1_gscale=a1_gscale,
+             a2_gscale=a2_gscale,
++            gemm1_alpha=gemm1_alpha,
++            gemm1_beta=gemm1_beta,
++            gemm1_clamp_limit=gemm1_clamp_limit,
+         )
+ 
+ 
+diff --git a/vllm/model_executor/layers/quantization/awq_marlin.py b/vllm/model_executor/layers/quantization/awq_marlin.py
+index b8fe2f272afc..0d09c8c41b30 100644
+--- a/vllm/model_executor/layers/quantization/awq_marlin.py
++++ b/vllm/model_executor/layers/quantization/awq_marlin.py
+@@ -709,6 +709,9 @@ def _setup_kernel(self, layer: RoutedExperts) -> None:
+         )
+ 
+     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
++        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
++        # quant config so the fused activation (e.g. swigluoai_uninterleave on
++        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+         return make_wna16_moe_quant_config(
+             w1_scale=layer.w13_scales,
+             w2_scale=layer.w2_scales,
+@@ -724,6 +727,9 @@ def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfi
+             w2_bias=getattr(layer, "w2_bias", None),
+             a1_gscale=getattr(layer, "w13_input_global_scale", None),
+             a2_gscale=getattr(layer, "w2_input_global_scale", None),
++            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
++            gemm1_beta=getattr(layer, "swiglu_beta", None),
++            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+         )
+ 
+     def select_gemm_impl(
+diff --git a/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py b/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py
+index a69d2a594ad6..d185433fca35 100644
+--- a/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py
++++ b/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py
+@@ -476,6 +476,9 @@ def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+     def get_fused_moe_quant_config(
+         self, layer: torch.nn.Module
+     ) -> FusedMoEQuantConfig | None:
++        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
++        # quant config so the fused activation (e.g. swigluoai_uninterleave on
++        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+         return make_wna16_moe_quant_config(
+             w1_scale=layer.w13_weight_scale,
+             w2_scale=layer.w2_weight_scale,
+@@ -483,6 +486,9 @@ def get_fused_moe_quant_config(
+             num_bits=self.num_bits,
+             w1_zp=getattr(layer, "w13_weight_zero_point", None),
+             w2_zp=getattr(layer, "w2_weight_zero_point", None),
++            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
++            gemm1_beta=getattr(layer, "swiglu_beta", None),
++            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+         )
+ 
+     def apply_monolithic(
+diff --git a/vllm/model_executor/layers/quantization/moe_wna16.py b/vllm/model_executor/layers/quantization/moe_wna16.py
+index ee4b455ddc40..b1a871b7fb92 100644
+--- a/vllm/model_executor/layers/quantization/moe_wna16.py
++++ b/vllm/model_executor/layers/quantization/moe_wna16.py
+@@ -347,12 +347,18 @@ def get_fused_moe_quant_config(
+             else int8_w8a16_moe_quant_config
+         )
+ 
++        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
++        # quant config so the fused activation (e.g. swigluoai_uninterleave on
++        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+         return config_builder(
+             w1_scale=layer.w13_scales,
+             w2_scale=layer.w2_scales,
+             w1_zp=layer.w13_qzeros if has_zp else None,
+             w2_zp=layer.w2_qzeros if has_zp else None,
+             block_shape=[0, layer.group_size],
++            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
++            gemm1_beta=getattr(layer, "swiglu_beta", None),
++            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+         )
+ 
+     def apply(
+diff --git a/vllm/models/minimax_m3/amd/model.py b/vllm/models/minimax_m3/amd/model.py
+index b80d3b8b3b8c..4a8c6d87f017 100644
+--- a/vllm/models/minimax_m3/amd/model.py
++++ b/vllm/models/minimax_m3/amd/model.py
+@@ -30,7 +30,10 @@
+     VllmConfig,
+     get_current_vllm_config,
+ )
+-from vllm.distributed import get_tensor_model_parallel_world_size
++from vllm.distributed import (
++    get_tensor_model_parallel_rank,
++    get_tensor_model_parallel_world_size,
++)
+ from vllm.forward_context import get_forward_context
+ from vllm.model_executor.layers.attention import Attention
+ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+@@ -44,8 +47,8 @@
+ )
+ from vllm.model_executor.layers.linear import (
+     MergedColumnParallelLinear,
+-    MinimaxM3QKVParallelLinearWithIndexer,
+     QKVParallelLinear,
++    ReplicatedLinear,
+     RowParallelLinear,
+ )
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+@@ -470,6 +473,9 @@ def __init__(
+         else:
+             assert tp_size % self.total_num_kv_heads == 0
+         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
++        # How many ranks share each KV head (>1 when tp_size > num_kv_heads).
++        self.num_kv_head_replicas = max(1, tp_size // self.total_num_kv_heads)
++        self.tp_rank = get_tensor_model_parallel_rank()
+         self.head_dim = config.head_dim
+         self.q_size = self.num_heads * self.head_dim
+         self.kv_size = self.num_kv_heads * self.head_dim
+@@ -484,18 +490,38 @@ def __init__(
+         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+         self.index_q_size = self.num_idx_heads * self.idx_head_dim
+ 
+-        # Single fused projection: q, k, v, index_q, index_k in one GEMM.
+-        self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
++        # Main q/k/v projection (quantized when quant_config is set). The sparse
++        # lightning indexer (index_q/index_k) is *not* fused in here: many
++        # checkpoints leave the indexer in bf16 while quantizing q/k/v, which a
++        # single packed GEMM can't represent. We keep them as separate
++        # unquantized projections and re-concatenate into the [q|k|v|index_q|
++        # index_k] layout the fused kernel expects (see forward()).
++        self.qkv_proj = QKVParallelLinear(
+             self.hidden_size,
+             self.head_dim,
+             self.total_num_heads,
+             self.total_num_kv_heads,
+-            self.total_idx_heads,
+-            self.idx_head_dim,
+             bias=False,
+             quant_config=quant_config,
+             prefix=f"{prefix}.qkv_proj",
+         )
++        # Unquantized indexer projections, replicated on every rank (full
++        # weight); the per-rank index_q slice is taken in forward(). index_k is
++        # a single head replicated to all ranks.
++        self.index_q_proj = ReplicatedLinear(
++            self.hidden_size,
++            self.total_idx_heads * self.idx_head_dim,
++            bias=False,
++            quant_config=None,
++            prefix=f"{prefix}.index_q_proj",
++        )
++        self.index_k_proj = ReplicatedLinear(
++            self.hidden_size,
++            self.idx_head_dim,
++            bias=False,
++            quant_config=None,
++            prefix=f"{prefix}.index_k_proj",
++        )
+         # reduce_results=False: the attention all-reduce is fused with the
+         # following post_attention_layernorm (GemmaRMSNorm) in the decoder layer
+         # via fused_allreduce_gemma_rms_norm.
+@@ -628,8 +654,17 @@ def forward(
+         positions: torch.Tensor,
+         hidden_states: torch.Tensor,
+     ) -> torch.Tensor:
+-        # Single fused projection emitting [q | k | v | index_q | index_k].
++        # q/k/v (possibly quantized) and the bf16 indexer projections are run
++        # separately, then concatenated into the single [q | k | v | index_q |
++        # index_k] buffer the fused kernel below consumes. index_q_proj is
++        # replicated, so slice this rank's KV-aligned head(s); index_k is a
++        # single replicated head used as-is.
+         qkv, _ = self.qkv_proj(hidden_states)
++        index_q_full, _ = self.index_q_proj(hidden_states)
++        index_k, _ = self.index_k_proj(hidden_states)
++        iq_start = (self.tp_rank // self.num_kv_head_replicas) * self.index_q_size
++        index_q = index_q_full.narrow(-1, iq_start, self.index_q_size)
++        qkv = torch.cat([qkv, index_q, index_k], dim=-1)
+ 
+         # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
+         # main (q/k) and index (index_q/index_k) branches, all read straight out
+@@ -881,10 +916,9 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+         # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
+-        # (dense MLP and shared expert). On sparse layers the indexer
+-        # index_q/index_k_proj fold into the same fused qkv_proj
+-        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
+-        # dense layers, whose checkpoints have no index_*_proj weights. Leading
++        # (dense MLP and shared expert). The sparse-attention indexer
++        # (index_q/index_k_proj) is NOT fused: it loads directly into the
++        # standalone bf16 ReplicatedLinear params, so it is absent here. Leading
+         # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
+         # (preceded by `_`, not `.`).
+         stacked_params_mapping: list[tuple[str, str, int | str]] = [
+@@ -892,8 +926,6 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+             (".qkv_proj", ".q_proj", "q"),
+             (".qkv_proj", ".k_proj", "k"),
+             (".qkv_proj", ".v_proj", "v"),
+-            (".qkv_proj", ".index_q_proj", "index_q"),
+-            (".qkv_proj", ".index_k_proj", "index_k"),
+             (".gate_up_proj", ".gate_proj", 0),
+             (".gate_up_proj", ".up_proj", 1),
+         ]
+diff --git a/vllm/models/minimax_m3/nvidia/model.py b/vllm/models/minimax_m3/nvidia/model.py
+index e2cd62704fda..69762f5a4e54 100644
+--- a/vllm/models/minimax_m3/nvidia/model.py
++++ b/vllm/models/minimax_m3/nvidia/model.py
+@@ -21,7 +21,10 @@
+ from vllm import _custom_ops as ops
+ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+-from vllm.distributed import get_tensor_model_parallel_world_size
++from vllm.distributed import (
++    get_tensor_model_parallel_rank,
++    get_tensor_model_parallel_world_size,
++)
+ from vllm.forward_context import get_forward_context
+ from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+ from vllm.model_executor.layers.attention import Attention
+@@ -36,8 +39,8 @@
+ )
+ from vllm.model_executor.layers.linear import (
+     MergedColumnParallelLinear,
+-    MinimaxM3QKVParallelLinearWithIndexer,
+     QKVParallelLinear,
++    ReplicatedLinear,
+     RowParallelLinear,
+ )
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+@@ -419,6 +422,9 @@ def __init__(
+         else:
+             assert tp_size % self.total_num_kv_heads == 0
+         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
++        # How many ranks share each KV head (>1 when tp_size > num_kv_heads).
++        self.num_kv_head_replicas = max(1, tp_size // self.total_num_kv_heads)
++        self.tp_rank = get_tensor_model_parallel_rank()
+         self.head_dim = config.head_dim
+         self.q_size = self.num_heads * self.head_dim
+         self.kv_size = self.num_kv_heads * self.head_dim
+@@ -433,18 +439,38 @@ def __init__(
+         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+         self.index_q_size = self.num_idx_heads * self.idx_head_dim
+ 
+-        # Single fused projection: q, k, v, index_q, index_k in one GEMM.
+-        self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
++        # Main q/k/v projection (quantized when quant_config is set). The sparse
++        # lightning indexer (index_q/index_k) is *not* fused in here: many
++        # checkpoints leave the indexer in bf16 while quantizing q/k/v, which a
++        # single packed GEMM can't represent. We keep them as separate
++        # unquantized projections and re-concatenate into the [q|k|v|index_q|
++        # index_k] layout the fused kernel expects (see forward()).
++        self.qkv_proj = QKVParallelLinear(
+             self.hidden_size,
+             self.head_dim,
+             self.total_num_heads,
+             self.total_num_kv_heads,
+-            self.total_idx_heads,
+-            self.idx_head_dim,
+             bias=False,
+             quant_config=quant_config,
+             prefix=f"{prefix}.qkv_proj",
+         )
++        # Unquantized indexer projections, replicated on every rank (full
++        # weight); the per-rank index_q slice is taken in forward(). index_k is
++        # a single head replicated to all ranks.
++        self.index_q_proj = ReplicatedLinear(
++            self.hidden_size,
++            self.total_idx_heads * self.idx_head_dim,
++            bias=False,
++            quant_config=None,
++            prefix=f"{prefix}.index_q_proj",
++        )
++        self.index_k_proj = ReplicatedLinear(
++            self.hidden_size,
++            self.idx_head_dim,
++            bias=False,
++            quant_config=None,
++            prefix=f"{prefix}.index_k_proj",
++        )
+         # reduce_results=False: the attention all-reduce is fused with the
+         # following post_attention_layernorm (GemmaRMSNorm) in the decoder layer
+         # via fused_allreduce_gemma_rms_norm.
+@@ -584,8 +610,17 @@ def forward(
+         positions: torch.Tensor,
+         hidden_states: torch.Tensor,
+     ) -> torch.Tensor:
+-        # Single fused projection emitting [q | k | v | index_q | index_k].
++        # q/k/v (possibly quantized) and the bf16 indexer projections are run
++        # separately, then concatenated into the single [q | k | v | index_q |
++        # index_k] buffer the fused kernel below consumes. index_q_proj is
++        # replicated, so slice this rank's KV-aligned head(s); index_k is a
++        # single replicated head used as-is.
+         qkv, _ = self.qkv_proj(hidden_states)
++        index_q_full, _ = self.index_q_proj(hidden_states)
++        index_k, _ = self.index_k_proj(hidden_states)
++        iq_start = (self.tp_rank // self.num_kv_head_replicas) * self.index_q_size
++        index_q = index_q_full.narrow(-1, iq_start, self.index_q_size)
++        qkv = torch.cat([qkv, index_q, index_k], dim=-1)
+ 
+         # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
+         # main (q/k) and index (index_q/index_k) branches, all read straight out
+@@ -836,10 +871,9 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+         # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
+-        # (dense MLP and shared expert). On sparse layers the indexer
+-        # index_q/index_k_proj fold into the same fused qkv_proj
+-        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
+-        # dense layers, whose checkpoints have no index_*_proj weights. Leading
++        # (dense MLP and shared expert). The sparse-attention indexer
++        # (index_q/index_k_proj) is NOT fused: it loads directly into the
++        # standalone bf16 ReplicatedLinear params, so it is absent here. Leading
+         # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
+         # (preceded by `_`, not `.`).
+         stacked_params_mapping: list[tuple[str, str, int | str]] = [
+@@ -847,8 +881,6 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+             (".qkv_proj", ".q_proj", "q"),
+             (".qkv_proj", ".k_proj", "k"),
+             (".qkv_proj", ".v_proj", "v"),
+-            (".qkv_proj", ".index_q_proj", "index_q"),
+-            (".qkv_proj", ".index_k_proj", "index_k"),
+             (".gate_up_proj", ".gate_proj", 0),
+             (".gate_up_proj", ".up_proj", 1),
+         ]
