@@ -48,6 +48,9 @@ For adaptive reasoning, requests pass `chat_template_kwargs: {"thinking_mode": "
 
 - **fix-minimax-m3-compressed-tensors** — un-fuses the bf16 MSA "lightning indexer" out of the INT4-quantized qkv projection. The AWQ checkpoint keeps the indexer in bf16 while q/k/v are INT4; the fused path quantized the indexer too → mis-selected tokens → garbled / context-bleed output under long/dense context. Ported from [toncao/vllm `minimax-m3-compressed-tensors`](https://github.com/toncao/vllm/tree/minimax-m3-compressed-tensors).
 - **fix-minimax-m3-reasoning-45718** — streaming reasoning parser ([vLLM PR #45718](https://github.com/vllm-project/vllm/pull/45718)) + chat-template tweak, so `thinking_mode: adaptive` streams reasoning into `reasoning_content` without leaking `<mm:think>` into content.
+  - **The bundled parser is PR #45718 head _plus_ a local `_looks_like_rendered_prompt` guard — keep it.** Bare upstream #45718 still leaks in `adaptive`: the adaptive chat template embeds literal `<mm:think>` marker examples in the system prompt, so `is_reasoning_end()` sees those special tokens in the *prompt*, thinks reasoning already ended, and disables the streaming extractor → the whole think block leaks into `content`. The guard makes `is_reasoning_end()` ignore prompt-resident markers. Don't "update to upstream head" without re-adding it. (PR #45718 fixes `enabled` mode only.)
+  - `chat_template.jinja` also gets an adaptive trivial-turn gate (`patch_chat_template.py`): trivial last-turn inputs ("hi", "thanks", "2+2", …) force `disabled` so chitchat skips hidden thinking.
+  - Verified on the 4× GB10 prod path (adaptive): multi-thousand-token reasoning streams cleanly into the reasoning field with the answer in `content`, trivial turns skip thinking, tool calls emit correct `tool_calls` — all with zero `<mm:think>` leak. Note: this vLLM build exposes the reasoning delta/message key as **`reasoning`** (not `reasoning_content`); read both.
 - **fix-minimax-m3-tool-parser** — MiniMax-M3 tool-call parser.
 - **fix-nccl-2.30.4** — swaps bundled libnccl for 2.30.4 on every rank (fixes a shm_broadcast wedge-under-load on multi-node Ray).
 
@@ -57,6 +60,6 @@ For adaptive reasoning, requests pass `chat_template_kwargs: {"thinking_mode": "
 2. Apply the four mods to the vLLM install (run each `run.sh`).
 3. Serve with the recipe above.
 
-Notes: fp8 KV requires the EAGLE3 draft on a fp8-capable attention backend (`TRITON_ATTN`, **not** `FLASH_ATTN`). Tested on vLLM `0.22.1` + CUDA 13, 4× GB10.
+Notes: fp8 KV requires the EAGLE3 draft on a fp8-capable attention backend (`TRITON_ATTN`, **not** `FLASH_ATTN`). Tested on vLLM `0.23.1rc1.dev` (commit `4c626633`, the #45744 merge) + torch 2.11.0/CUDA 13, 4× GB10.
 
 Patches derive from vLLM (Apache-2.0); credit to toncao (indexer) and the PR #45718 author (reasoning).
